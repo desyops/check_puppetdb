@@ -4,7 +4,7 @@ check_puppetdb
 PuppetDB monitoring script for Nagios/Icinga/Shinken
 
 Support for PuppetDB API:
-* PuppetDB version 6.9 and higher /v2/metrics *only reachable from localhost, see #14* (https://github.com/puppetlabs/puppetserver/blob/master/documentation/metrics-api/v2/metrics_api.markdown)
+* PuppetDB version 6.9 and higher /v2/metrics (https://puppet.com/docs/puppetdb/7/api/metrics/v2/jolokia.html)
 * PuppetDB version 6.0 (https://docs.puppet.com/puppetdb/6.0/api/metrics/v1/mbeans.html)
 * PuppetDB version 5.0 (https://docs.puppet.com/puppetdb/5.0/api/metrics/v1/mbeans.html)
 * PuppetDB version 4.4 (https://docs.puppet.com/puppetdb/4.4/api/metrics/v1/mbeans.html)
@@ -37,6 +37,35 @@ Usage: check_puppetdb [options]
                                      WARNING threshold for Commands processed per second, defaults to -1 cmds/s
         --cmd_p_seccrit [CRITTHRESHOLD]
                                      CRITICAL threshold for Commands processed per second, defaults to -1 cmds/s
+        --sslcert [SSLCERT]          Path to client certificate file for SSL client authentication
+        --sslkey [SSLKEY]            Path to private key file for SSL client authentication
+        --sslcacert [SSLCACERT]      Path to certificate file for peer verification
+        --sslverify [true/false/yes/no]
+                                     Enable or disable SSL verficiation, defaults to yes
+        --sslquery [true/false/yes/no]
+                                     Query metrics via SSL, defaults to yes
+```
+
+For PuppetDB >=6.14.0 and >=7.1.0, you'll have to use `--sslquery yes` and specifcy a client certificate with `--sslcert`, `--sslkey`, `--sslcacert`.
+
+These versions allow by default to query from remote, but only with a valid certificate.
+
+Queries via the HTTP port will not work either, only if `/etc/puppetlabs/puppetdb/conf.d/auth.conf` is updated to include `allow-unauthenticated: true`:
+
+```
+        {
+            # Allow nodes to access the metrics service
+            # for puppetdb, the metrics service is the only
+            # service using the authentication service
+            match-request: {
+                path: "/metrics"
+                type: path
+                method: [get, post]
+            }
+            allow-unauthenticated: true
+            sort-order: 500
+            name: "puppetlabs puppetdb metrics"
+        },
 ```
 
 ![checkmk](https://github.com/xorpaul/check_puppetdb/raw/master/example-images/checkmk.png)
