@@ -11,10 +11,11 @@
 require 'rubygems'
 require 'optparse'
 require 'open-uri'
-require 'uri'
+require 'net/http'
 require 'json'
 require 'socket'
 require 'timeout'
+require 'openssl'
 
 $debug = false
 $checkmk = false
@@ -58,6 +59,30 @@ opt.on("--cmd_p_secwarn [WARNTHRESHOLD]", Float, "WARNING threshold for Commands
 end
 opt.on("--cmd_p_seccrit [CRITTHRESHOLD]", Float, "CRITICAL threshold for Commands processed per second, defaults to #{$cmd_p_seccrit} cmds/s") do |cc_p|
     $cmd_p_seccrit = cc_p
+end
+opt.on("--sslcert [SSLCERT]", String, "Path to client certificate file for SSL client authentication") do |sslcert|
+    $sslcert = OpenSSL::X509::Certificate.new(File.read(sslcert))
+end
+opt.on("--sslkey [SSLKEY]", String, "Path to private key file for SSL client authentication") do |sslkey|
+    $sslkey = OpenSSL::PKey.read(File.read(sslkey))
+end
+opt.on("--sslcacert [SSLCACERT]", String, "Path to certificate file for peer verification") do |sslcacert|
+    $sslcacert = sslcacert
+end
+opt.on("--sslverify [true/false/yes/no]", TrueClass, "Enable or disable SSL verficiation, defaults to yes") do |sslverify|
+    if sslverify
+      $sslverify = OpenSSL::SSL::VERIFY_PEER
+    else
+      $sslverify = OpenSSL::SSL::VERIFY_NONE
+    end
+end
+opt.on("--sslquery [true/false/yes/no]", TrueClass, "Query metrics via SSL, defaults to yes") do |sslquery|
+    if sslquery
+      $proto = 'https://'
+    else
+      $proto = 'http://'
+    end
+    $sslquery = sslquery
 end
 opt.parse!
 
@@ -105,13 +130,27 @@ end
 
 def doRequest(url)
   out = {'returncode' => 0}
+  options = {}
   puts "sending GET to #{url}" if $debug
   begin
-    encoded_url = URI.encode(url)
-    uri = URI.parse(encoded_url)
-    response = uri.read(:read_timeout => $timeout)
-    puts "Response: #{response}" if $debug
-    out['data'] = JSON.load(response)
+    uri = URI.parse(url)
+    if uri.scheme == 'https'
+      options = {
+        :cert => $sslcert,
+        :key => $sslkey,
+        :ca_file => $sslca,
+        :use_ssl => true,
+        :verify_mode => $sslverify,
+      }
+    end
+    Net::HTTP.start(
+      uri.host, uri.port, options,
+    ) do |http|
+      request = Net::HTTP::Get.new uri
+      response = http.request request
+      puts "Response: #{response}" if $debug
+      out['data'] = JSON.load(response.body)
+    end
   rescue OpenURI::HTTPError, Timeout::Error, Errno::EINVAL, Errno::ECONNRESET, EOFError, Errno::ECONNREFUSED,
     Net::HTTPBadResponse, Net::HTTPHeaderSyntaxError, Net::ProtocolError => e
     out['text'] = "WARNING: Error '#{e}' while sending request to #{url}"
@@ -122,7 +161,7 @@ def doRequest(url)
 end
 
 def checkApiVersion()
-  v43url = "http://#{$host}:#{$port}/pdb/meta/v1/version"
+  v43url = "#{$proto}#{$host}:#{$port}/pdb/meta/v1/version"
   v1url = "http://#{$host}:#{$port}/v3/metrics/mbean/com.puppetlabs.puppetdb.command:type=global,name=processing-time"
   data = doRequest(v43url)
   return data['data']['version'].to_s if data['returncode'] == 0
@@ -134,7 +173,7 @@ def commandProcessingMetrics(warn, crit)
   result = {'perfdata' => ''}
   case $api_version
   when /^6/
-    url = "http://#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.mq:name=global.processing-time"
+    url = "#{$proto}#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.mq:name=global.processing-time"
   when /^[45]/
     url = "http://#{$host}:#{$port}/metrics/v1/mbeans/puppetlabs.puppetdb.mq:name=global.processing-time"
   when /^3/
@@ -175,7 +214,7 @@ def databaseMetrics()
   result = {'perfdata' => '', 'returncode' => 0}
   case $api_version
   when /^6/
-    url = "http://#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.mq:name=global.processing-time"
+    url = "#{$proto}#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.mq:name=global.processing-time"
   when /^3/
     url = "http://#{$host}:#{$port}/metrics/v1/mbeans/com.jolbox.bonecp:type=BoneCP"
   when /^1/
@@ -200,7 +239,7 @@ def databaseMetricsHikari(pool='Write')
   result = {'perfdata' => '', 'returncode' => 0}
   case $api_version
   when /^6/
-    url = "http://#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.database:name=PDB#{pool}Pool.pool.ActiveConnections"
+    url = "#{$proto}#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.database:name=PDB#{pool}Pool.pool.ActiveConnections"
   else
     url = "http://#{$host}:#{$port}/metrics/v1/mbeans/puppetlabs.puppetdb.database:name=PDB#{pool}Pool.pool.ActiveConnections"
   end
@@ -220,7 +259,7 @@ def databaseMetricsHikari(pool='Write')
 
   case $api_version
   when /^6/
-    url = "http://#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.database:name=PDB#{pool}Pool.pool.TotalConnections"
+    url = "#{$proto}#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.database:name=PDB#{pool}Pool.pool.TotalConnections"
   else
     url = "http://#{$host}:#{$port}/metrics/v1/mbeans/puppetlabs.puppetdb.database:name=PDB#{pool}Pool.pool.TotalConnections"
   end
@@ -243,7 +282,7 @@ def databaseMetrics()
   result = {'perfdata' => '', 'returncode' => 0}
   case $api_version
   when /^6/
-    url = "http://#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.mq:name=global.processing-time"
+    url = "#{$proto}#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.mq:name=global.processing-time"
   when /^[45]/
     url = "http://#{$host}:#{$port}/metrics/v1/mbeans/puppetlabs.puppetdb.mq:name=global.processing-time"
     return {'perfdata' => '', 'returncode' => 0, 'text' => 'database metrics and APIv4 not supported yet'}
@@ -271,7 +310,7 @@ def JvmMetrics()
   result = {'perfdata' => '', 'returncode' => 0}
   case $api_version
   when /^6/
-    url = "http://#{$host}:#{$port}/metrics/v2/read/java.lang:type=Memory"
+    url = "#{$proto}#{$host}:#{$port}/metrics/v2/read/java.lang:type=Memory"
   when /^[3,4,5]/
     url = "http://#{$host}:#{$port}/metrics/v1/mbeans/java.lang:type=Memory"
   when /^1/
@@ -298,7 +337,7 @@ def JvmThreading()
   result = {'perfdata' => '', 'returncode' => 0}
   case $api_version
   when /^6/
-    url = "http://#{$host}:#{$port}/metrics/v2/read/java.lang:type=Threading"
+    url = "#{$proto}#{$host}:#{$port}/metrics/v2/read/java.lang:type=Threading"
   when /^[3,4,5]/
     url = "http://#{$host}:#{$port}/metrics/v1/mbeans/java.lang:type=Threading"
   when /^1/
@@ -326,7 +365,7 @@ def commandProcessedMetrics()
   result = {'perfdata' => '', 'returncode' => 0}
   case $api_version
   when /^6/
-    url = "http://#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.mq:name=global.processed"
+    url = "#{$proto}#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.mq:name=global.processed"
   when /^[45]/
     url = "http://#{$host}:#{$port}/metrics/v1/mbeans/puppetlabs.puppetdb.mq:name=global.processed"
   when /^3/
@@ -353,7 +392,7 @@ def commandRetriedMetrics()
   result = {'perfdata' => '', 'returncode' => 0}
   case $api_version
   when /^6/
-    url = "http://#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.mq:name=global.retried"
+    url = "#{$proto}#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.mq:name=global.retried"
   when /^[45]/
     url = "http://#{$host}:#{$port}/metrics/v1/mbeans/puppetlabs.puppetdb.mq:name=global.retried"
   when /^3/
@@ -380,7 +419,7 @@ def queueMetrics(warn, crit)
   result = {'perfdata' => '', 'returncode' => 0}
   case $api_version
   when /^6/
-    url = "http://#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.mq:name=global.depth"
+    url = "#{$proto}#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.mq:name=global.depth"
   when /^(4\.[3-9]+)|^5/
     url = "http://#{$host}:#{$port}/metrics/v1/mbeans/puppetlabs.puppetdb.mq:name=global.depth"
   when /^[43]/
@@ -429,7 +468,7 @@ def catalogDuplicatesMetrics()
   result = {'perfdata' => '', 'returncode' => 0}
   case $api_version
   when /^6/
-    url = "http://#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.storage:name=duplicate-pct"
+    url = "#{$proto}#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.storage:name=duplicate-pct"
   when /^[45]/
     url = "http://#{$host}:#{$port}/metrics/v1/mbeans/puppetlabs.puppetdb.storage:name=duplicate-pct"
   when /^3/
@@ -456,7 +495,7 @@ def resourceDuplicatesMetrics()
   result = {'perfdata' => '', 'returncode' => 0}
   case $api_version
   when /^6/
-    url = "http://#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.population:name=pct-resource-dupes"
+    url = "#{$proto}#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.population:name=pct-resource-dupes"
   when /^[45]/
     url = "http://#{$host}:#{$port}/metrics/v1/mbeans/puppetlabs.puppetdb.population:name=pct-resource-dupes"
   when /^3/
@@ -490,7 +529,7 @@ def populationNodesMetrics()
   result = {'perfdata' => '', 'returncode' => 0}
   case $api_version
   when /^6/
-    url = "http://#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.population:name=num-nodes"
+    url = "#{$proto}#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.population:name=num-nodes"
   when /^[45]/
     url = "http://#{$host}:#{$port}/metrics/v1/mbeans/puppetlabs.puppetdb.population:name=num-nodes"
   when /^3/
@@ -513,7 +552,7 @@ def populationNodesMetrics()
 
   # api version 6 introduced num-active-nodes and num-inactive-nodes endpoints
   if $api_version.match(/^6/)
-    url = "http://#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.population:name=num-inactive-nodes"
+    url = "#{$proto}#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.population:name=num-inactive-nodes"
     data = doRequest(url)
     if data['returncode'] == 0
       num_inactive_nodes = data['data']['value']['Value']
@@ -529,7 +568,7 @@ def populationResourcesMetrics()
   result = {'perfdata' => '', 'returncode' => 0}
   case $api_version
   when /^6/
-    url = "http://#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.population:name=num-resources"
+    url = "#{$proto}#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.population:name=num-resources"
   when /^[45]/
     url = "http://#{$host}:#{$port}/metrics/v1/mbeans/puppetlabs.puppetdb.population:name=num-resources"
   when /^3/
@@ -556,7 +595,7 @@ def dloMetrics()
   result = {'perfdata' => '', 'returncode' => 0}
   case $api_version
   when /^6/
-    url = "http://#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.dlo:name=puppetlabs.puppetdb.dlo.global.messages"
+    url = "#{$proto}#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.dlo:name=puppetlabs.puppetdb.dlo.global.messages"
   end
   data = doRequest(url)
   if data['returncode'] == 0
@@ -570,7 +609,7 @@ def dloMetrics()
 
   case $api_version
   when /^6/
-    url = "http://#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.dlo:name=puppetlabs.puppetdb.dlo.global.filesize"
+    url = "#{$proto}#{$host}:#{$port}/metrics/v2/read/puppetlabs.puppetdb.dlo:name=puppetlabs.puppetdb.dlo.global.filesize"
   end
   data = doRequest(url)
   if data['returncode'] == 0
@@ -587,7 +626,7 @@ results = []
 
 # Check if plain HTTP port is open
 skip_checks = false
-if ! is_port_open?($host, $port)
+if ! $sslquery && ! is_port_open?($host, $port)
   # skip all metric checks
   skip_checks = true
   results << {'text' => "CRITICAL: Could not connect to plain HTTP port #{$host}:#{$port}", 'returncode' => 2, 'perfdata' => ''}
@@ -595,7 +634,10 @@ end
 
 # Check if plain SSL port is open
 if ! is_port_open?($host, $sslport)
-  # don't skip metric checks, but add CRITICAL result
+  # Skip checks with enabled sslquery and add CRITICAL result
+  if $sslquery
+    skip_check = true
+  end
   results << {'text' => "CRITICAL: Could not connect to SSL port #{$host}:#{$sslport}", 'returncode' => 2, 'perfdata' => ''}
 end
 
